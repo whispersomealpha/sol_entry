@@ -54,8 +54,11 @@ function limiter(n) {
 const limit = limiter(CONCURRENCY);
 
 // ---------- RPC with retry/backoff ----------
+const RPC_HOST = new URL(RPC_URL).host;
+const IS_HELIUS = /helius/.test(RPC_HOST);
+const backoff = (i) => Math.min(15000, 600 * 2 ** i) + Math.random() * 400;
 let rpcId = 0;
-async function rpc(method, params, tries = 6) {
+async function rpc(method, params, tries = 7) {
   let lastErr;
   for (let i = 0; i < tries; i++) {
     let r;
@@ -67,12 +70,13 @@ async function rpc(method, params, tries = 6) {
       });
     } catch (e) {
       lastErr = e;
-      await sleep(400 * 2 ** i);
+      await sleep(backoff(i));
       continue;
     }
     if (r.status === 429 || r.status >= 500) {
-      lastErr = new Error(`${method}: HTTP ${r.status}`);
-      await sleep(400 * 2 ** i);
+      lastErr = new Error(`${method}: HTTP ${r.status}${r.status === 429 ? ` (rate-limited by ${RPC_HOST})` : ''}`);
+      const ra = Number(r.headers.get('retry-after'));
+      await sleep(ra ? ra * 1000 : backoff(i));
       continue;
     }
     const j = await r.json();
@@ -80,7 +84,7 @@ async function rpc(method, params, tries = 6) {
       const msg = j.error.message || JSON.stringify(j.error);
       if (/rate|limit|timeout|too many/i.test(msg) && i < tries - 1) {
         lastErr = new Error(msg);
-        await sleep(400 * 2 ** i);
+        await sleep(backoff(i));
         continue;
       }
       throw new Error(`${method}: ${msg}`);
@@ -91,14 +95,40 @@ async function rpc(method, params, tries = 6) {
 }
 
 // ---------- top holders ----------
+// Fallback: Helius DAS getTokenAccounts (pages all holders, sorts locally)
+async function largestViaDas(mint) {
+  const all = [];
+  let cursor;
+  for (let page = 0; page < 30; page++) {
+    const params = { mint, limit: 1000 };
+    if (cursor) params.cursor = cursor;
+    const r = await rpc('getTokenAccounts', params);
+    const list = r?.token_accounts || [];
+    all.push(...list);
+    cursor = r?.cursor;
+    if (!cursor || list.length < 1000) break;
+  }
+  if (!all.length) throw new Error('DAS getTokenAccounts returned no holders');
+  return all
+    .map((a) => ({ address: a.address, amount: String(a.amount) }))
+    .sort((a, b) => (BigInt(b.amount) > BigInt(a.amount) ? 1 : -1));
+}
+
 async function getTopHolders(mint) {
-  const [supplyRes, largest] = await Promise.all([
-    rpc('getTokenSupply', [mint]),
-    rpc('getTokenLargestAccounts', [mint]),
-  ]);
+  const supplyRes = await rpc('getTokenSupply', [mint]);
+  let largestList;
+  try {
+    largestList = (await rpc('getTokenLargestAccounts', [mint], 5)).value;
+  } catch (e) {
+    if (!IS_HELIUS) {
+      throw new Error(`${e.message}. No Helius key detected — set HELIUS_API_KEY in Railway Variables; the public RPC blocks this call.`);
+    }
+    console.warn('getTokenLargestAccounts failed, falling back to DAS:', e.message);
+    largestList = await largestViaDas(mint);
+  }
   const decimals = supplyRes.value.decimals;
   const supply = Number(supplyRes.value.amount) / 10 ** decimals;
-  const accts = largest.value.slice(0, 20);
+  const accts = largestList.slice(0, 20);
 
   const info = await rpc('getMultipleAccounts', [
     accts.map((a) => a.address),
@@ -441,6 +471,8 @@ async function analyze(mint, ctx) {
 const app = express();
 app.use(express.static(path.join(__dirname, 'public')));
 const cache = new Map();
+
+app.get('/api/health', (req, res) => res.json({ rpc: RPC_HOST, helius: IS_HELIUS, coingecko: !!CG_KEY }));
 
 app.get('/api/analyze', async (req, res) => {
   const mint = String(req.query.mint || '').trim();
