@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Holder Entries</title>
+<style>
+  :root{--bg:#0b0d12;--panel:#12151d;--line:#222736;--text:#e6e8ef;--muted:#8a91a6;--green:#3ddc97;--red:#ff5c7a;--amber:#ffb547;--accent:#7c9cff}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+  .wrap{max-width:1400px;margin:0 auto;padding:20px 16px}
+  h1{font-size:18px;margin:0 0 14px;font-weight:600}
+  form{display:flex;gap:8px;flex-wrap:wrap}
+  input{flex:1;min-width:260px;background:var(--panel);border:1px solid var(--line);color:var(--text);padding:10px 12px;border-radius:8px;font:13px ui-monospace,Menlo,monospace}
+  button{background:var(--accent);color:#0b0d12;border:0;padding:10px 16px;border-radius:8px;font-weight:600;cursor:pointer}
+  button.ghost{background:transparent;color:var(--muted);border:1px solid var(--line)}
+  button:disabled{opacity:.5;cursor:default}
+  .status{margin:14px 0;color:var(--muted);min-height:20px}
+  .bar{height:4px;background:var(--line);border-radius:4px;overflow:hidden;margin-top:6px}
+  .bar i{display:block;height:100%;width:0;background:var(--accent);transition:width .2s}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin:14px 0}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px}
+  .card b{display:block;font-size:17px;margin-top:2px}
+  .card span{color:var(--muted);font-size:12px}
+  .tablewrap{overflow-x:auto;border:1px solid var(--line);border-radius:10px}
+  table{width:100%;border-collapse:collapse;white-space:nowrap}
+  th,td{padding:9px 10px;border-bottom:1px solid var(--line);text-align:right}
+  th{position:sticky;top:0;background:var(--panel);color:var(--muted);font-weight:500;font-size:12px;cursor:pointer;user-select:none}
+  th:first-child,td:first-child,th:nth-child(2),td:nth-child(2){text-align:left}
+  tbody tr{cursor:pointer}
+  tbody tr:hover{background:#161a24}
+  tr.prog{opacity:.45;cursor:default}
+  .mono{font-family:ui-monospace,Menlo,monospace;font-size:12.5px}
+  .g{color:var(--green)}.r{color:var(--red)}.a{color:var(--amber)}.m{color:var(--muted)}
+  .tag{display:inline-block;font-size:11px;padding:1px 6px;border-radius:5px;border:1px solid var(--line);color:var(--muted);margin-left:4px}
+  .tag.a{border-color:#5a4520;color:var(--amber)}
+  a{color:var(--accent);text-decoration:none}
+  .warn{background:#2a2010;border:1px solid #5a4520;color:var(--amber);padding:8px 12px;border-radius:8px;margin:10px 0}
+  dialog{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:12px;width:min(900px,95vw);max-height:85vh;padding:0}
+  dialog::backdrop{background:#000a}
+  .dh{padding:14px 16px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:10px;align-items:center}
+  .db{padding:0 16px 16px;overflow:auto;max-height:70vh}
+  .legend{color:var(--muted);font-size:12px;margin-top:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Top 20 holders · average entry</h1>
+  <form id="f">
+    <input id="mint" placeholder="Solana token mint address" autocomplete="off" spellcheck="false" />
+    <button id="go">Analyze</button>
+    <button type="button" class="ghost" id="fresh" title="Ignore cache">Refresh</button>
+  </form>
+  <div class="status" id="status"></div>
+  <div class="bar" id="barwrap" hidden><i id="bar"></i></div>
+  <div id="out"></div>
+  <div class="legend">Avg entry = total SOL/USDC spent on buys ÷ tokens bought (SOL converted to USD at the hourly price of each buy). Entry MC = avg entry × total supply. “Bought %” = share of acquired tokens that were bought vs received by transfer — a low value means most of the bag arrived for free (dev, insider, airdrop, or a wallet fed by another wallet). Pools, bonding curves and other program-owned accounts are dimmed and skipped.</div>
+</div>
+
+<dialog id="dlg"><div class="dh"><div id="dtitle"></div><button class="ghost" onclick="dlg.close()">Close</button></div><div class="db" id="dbody"></div></dialog>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let es, data, sortKey = 'rank', sortDir = 1;
+
+const short = (a) => a ? a.slice(0, 4) + '…' + a.slice(-4) : '—';
+function fmtPrice(p) {
+  if (p == null || !isFinite(p)) return '—';
+  if (p >= 1) return '$' + p.toLocaleString(undefined, { maximumFractionDigits: 4 });
+  const s = p.toFixed(20).split('.')[1];
+  const z = s.match(/^0*/)[0].length;
+  const sig = s.slice(z, z + 4).replace(/0+$/, '') || '0';
+  if (z >= 4) return '$0.0' + String(z).split('').map(d => '₀₁₂₃₄₅₆₇₈₉'[d]).join('') + sig;
+  return '$' + p.toPrecision(4).replace(/0+$/, '');
+}
+function fmtSolPrice(p) { return p == null ? '—' : fmtPrice(p).replace('$', '') + ' SOL'; }
+function fmtUsd(n) {
+  if (n == null || !isFinite(n)) return '—';
+  const a = Math.abs(n), s = n < 0 ? '-' : '';
+  if (a >= 1e9) return s + '$' + (a / 1e9).toFixed(2) + 'B';
+  if (a >= 1e6) return s + '$' + (a / 1e6).toFixed(2) + 'M';
+  if (a >= 1e3) return s + '$' + (a / 1e3).toFixed(1) + 'K';
+  return s + '$' + a.toFixed(0);
+}
+function fmtNum(n) {
+  if (n == null) return '—';
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+}
+function fmtDate(t) {
+  if (!t) return '—';
+  return new Date(t * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+function ago(t) {
+  if (!t) return '';
+  const s = Date.now() / 1000 - t;
+  if (s < 3600) return Math.round(s / 60) + 'm ago';
+  if (s < 86400) return Math.round(s / 3600) + 'h ago';
+  return Math.round(s / 86400) + 'd ago';
+}
+function mult(x) {
+  if (x == null) return '<span class="m">—</span>';
+  const c = x >= 1 ? 'g' : 'r';
+  return `<span class="${c}">${x >= 10 ? x.toFixed(0) : x.toFixed(2)}x</span>`;
+}
+
+function run(fresh) {
+  const mint = $('mint').value.trim();
+  if (!mint) return;
+  if (es) es.close();
+  history.replaceState(null, '', '?mint=' + mint);
+  $('out').innerHTML = '';
+  $('go').disabled = true;
+  $('barwrap').hidden = false; $('bar').style.width = '0';
+  $('status').textContent = 'Starting…';
+  let phase = '', hd = 0, ht = 0;
+  es = new EventSource('/api/analyze?mint=' + encodeURIComponent(mint) + (fresh ? '&fresh=1' : ''));
+  es.addEventListener('progress', (ev) => {
+    const p = JSON.parse(ev.data);
+    if (p.phase) phase = p.phase;
+    if (p.holdersTotal) { hd = p.holdersDone; ht = p.holdersTotal; }
+    if (p.txTotal) $('bar').style.width = (100 * p.txDone / p.txTotal).toFixed(1) + '%';
+    $('status').textContent = phase + (ht ? ` · wallets ${hd}/${ht}` : '') + (p.txTotal ? ` · txs ${p.txDone}/${p.txTotal}` : '');
+  });
+  es.addEventListener('result', (ev) => { data = JSON.parse(ev.data); done(); render(); });
+  es.addEventListener('fail', (ev) => { done(); $('status').innerHTML = '<span class="r">Error: ' + JSON.parse(ev.data).error + '</span>'; });
+  es.onerror = () => { if (!data || data.mint !== mint) { done(); $('status').innerHTML = '<span class="r">Connection lost.</span>'; } };
+}
+function done() { es && es.close(); $('go').disabled = false; $('barwrap').hidden = true; }
+
+function render() {
+  const d = data, s = d.summary, m = d.market || {};
+  $('status').innerHTML = `${m.name ? `<b>${m.name}</b> (${m.symbol}) · ` : ''}<span class="mono">${d.mint}</span>` +
+    `${m.pairUrl ? ` · <a href="${m.pairUrl}" target="_blank">chart</a>` : ''} · <span class="m">${d.cached ? 'cached · ' : ''}${new Date(d.generatedAt).toLocaleTimeString()}</span>`;
+  const rows = [...d.rows].sort((a, b) => {
+    const va = a[sortKey], vb = b[sortKey];
+    if (va == null && vb == null) return 0;
+    if (va == null) return 1; if (vb == null) return -1;
+    return (va > vb ? 1 : va < vb ? -1 : 0) * sortDir;
+  });
+  const cols = [
+    ['rank', '#'], ['owner', 'Wallet'], ['pctSupply', '% supply'], ['balance', 'Balance'],
+    ['avgEntryUsd', 'Avg entry'], ['avgEntrySol', 'Avg entry (SOL)'], ['entryMcapUsd', 'Entry MC'],
+    ['multiple', 'Now vs entry'], ['unrealizedUsd', 'Unreal. PnL'], ['costUsd', 'Spent'],
+    ['buys', 'Buys'], ['sells', 'Sells'], ['boughtShare', 'Bought %'], ['firstBuy', 'First buy'], ['lastBuy', 'Last buy'],
+  ];
+  const arrow = (k) => sortKey === k ? (sortDir > 0 ? ' ▲' : ' ▼') : '';
+  $('out').innerHTML = `
+    ${d.priceWarning ? `<div class="warn">${d.priceWarning}</div>` : ''}
+    <div class="cards">
+      <div class="card"><span>Price now</span><b>${fmtPrice(d.priceNow)}</b></div>
+      <div class="card"><span>MC (total supply)</span><b>${fmtUsd(d.priceNow ? d.priceNow * d.supply : null)}</b></div>
+      <div class="card"><span>Top-20 wtd. avg entry</span><b>${fmtPrice(s.weightedEntryUsd)}</b></div>
+      <div class="card"><span>…as market cap</span><b>${fmtUsd(s.weightedEntryMcapUsd)}</b></div>
+      <div class="card"><span>Wallets in profit</span><b>${s.inProfit} / ${s.walletsWithEntry}</b></div>
+      <div class="card"><span>Top 20 hold</span><b>${s.top20PctSupply.toFixed(1)}%</b></div>
+    </div>
+    <div class="tablewrap"><table>
+      <thead><tr>${cols.map(([k, l]) => `<th data-k="${k}">${l}${arrow(k)}</th>`).join('')}</tr></thead>
+      <tbody>${rows.map(rowHtml).join('')}</tbody>
+    </table></div>`;
+  document.querySelectorAll('th').forEach((th) => th.onclick = () => {
+    const k = th.dataset.k; sortDir = sortKey === k ? -sortDir : (k === 'rank' ? 1 : -1); sortKey = k; render();
+  });
+  document.querySelectorAll('tbody tr[data-r]').forEach((tr) => tr.onclick = () => openDetail(+tr.dataset.r));
+}
+
+function rowHtml(r) {
+  const wallet = `<a class="mono" href="https://solscan.io/account/${r.owner}" target="_blank" onclick="event.stopPropagation()">${short(r.owner)}</a>`;
+  if (r.isProgram) {
+    return `<tr class="prog"><td>${r.rank}</td><td>${wallet}<span class="tag">pool / program</span></td><td>${r.pctSupply.toFixed(2)}%</td><td>${fmtNum(r.balance)}</td><td colspan="11" style="text-align:left" class="m">skipped</td></tr>`;
+  }
+  const tags = [];
+  if (!r.buys && r.tokensIn) tags.push('<span class="tag a">no buys · transferred in</span>');
+  else if (r.boughtShare != null && r.boughtShare < 0.5) tags.push('<span class="tag a">mostly transfers</span>');
+  if (r.partial) tags.push('<span class="tag a">partial history</span>');
+  const bs = r.boughtShare == null ? '—' : `<span class="${r.boughtShare < 0.5 ? 'a' : ''}">${(r.boughtShare * 100).toFixed(0)}%</span>`;
+  const pnl = r.unrealizedUsd == null ? '—' : `<span class="${r.unrealizedUsd >= 0 ? 'g' : 'r'}">${fmtUsd(r.unrealizedUsd)}</span>`;
+  return `<tr data-r="${r.rank}">
+    <td>${r.rank}</td><td>${wallet}${tags.join('')}</td>
+    <td>${r.pctSupply.toFixed(2)}%</td><td>${fmtNum(r.balance)}</td>
+    <td>${fmtPrice(r.avgEntryUsd)}</td><td class="m">${fmtSolPrice(r.avgEntrySol)}</td>
+    <td>${fmtUsd(r.entryMcapUsd)}</td><td>${mult(r.multiple)}</td><td>${pnl}</td>
+    <td>${r.costUsd != null ? fmtUsd(r.costUsd) : (r.costSol ? r.costSol.toFixed(2) + ' SOL' : '—')}</td>
+    <td>${r.buys}</td><td>${r.sells}</td><td>${bs}</td>
+    <td title="${fmtDate(r.firstBuy)}">${fmtDate(r.firstBuy)} <span class="m">${ago(r.firstBuy)}</span></td>
+    <td>${fmtDate(r.lastBuy)}</td></tr>`;
+}
+
+function openDetail(rank) {
+  const r = data.rows.find((x) => x.rank === rank);
+  $('dtitle').innerHTML = `<b>#${r.rank}</b> <a class="mono" href="https://solscan.io/account/${r.owner}" target="_blank">${r.owner}</a>
+    <div class="m" style="font-size:12px;margin-top:4px">Bought ${fmtNum(r.tokensBought)} · Sold ${fmtNum(r.tokensSold)} · In ${fmtNum(r.tokensIn)} · Out ${fmtNum(r.tokensOut)} · Spent ${r.costSol.toFixed(3)} SOL · Received ${r.procSol.toFixed(3)} SOL · ${r.txCount} txs${r.partial ? ' · <span class="a">partial history</span>' : ''}</div>`;
+  const label = { buy: '<span class="g">BUY</span>', sell: '<span class="r">SELL</span>', transfer_in: '<span class="a">IN</span>', transfer_out: '<span class="m">OUT</span>' };
+  $('dbody').innerHTML = `<table><thead><tr><th>Time</th><th>Type</th><th>Tokens</th><th>SOL</th><th>USD</th><th>Price</th><th>Tx</th></tr></thead><tbody>
+    ${[...r.events].reverse().map((e) => `<tr style="cursor:default"><td>${fmtDate(e.time)}</td><td style="text-align:left">${label[e.type]}</td>
+      <td>${fmtNum(e.tokens)}</td><td>${e.valueSol != null ? e.valueSol.toFixed(3) : '—'}</td><td>${fmtUsd(e.valueUsd)}</td>
+      <td>${fmtPrice(e.priceUsd)}</td><td><a class="mono" href="https://solscan.io/tx/${e.sig}" target="_blank">${e.sig.slice(0, 6)}…</a></td></tr>`).join('')}
+  </tbody></table>${r.events.length >= 500 ? '<p class="m">Showing latest 500 events.</p>' : ''}`;
+  $('dlg').showModal();
+}
+
+$('f').onsubmit = (e) => { e.preventDefault(); run(false); };
+$('fresh').onclick = () => run(true);
+const q = new URLSearchParams(location.search).get('mint');
+if (q) { $('mint').value = q; run(false); }
+</script>
+</body>
+</html>

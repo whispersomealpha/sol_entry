@@ -1,0 +1,15 @@
+{
+  "name": "holder-entries",
+  "version": "1.0.0",
+  "description": "Average entry price for the top 20 holders of any Solana token",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
